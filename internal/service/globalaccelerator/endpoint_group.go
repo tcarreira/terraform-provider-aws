@@ -235,8 +235,14 @@ func resourceEndpointGroupRead(ctx context.Context, d *schema.ResourceData, meta
 		return sdkdiag.AppendFromErr(diags, err)
 	}
 
+	// conn.ListCrossAccountResourceAccounts(ctx, params *globalaccelerator.ListCrossAccountResourceAccountsInput, optFns ...func(*globalaccelerator.Options))
+	crossAccountResources, err := getCrossAccountResources(ctx, conn)
+	if err != nil {
+		return sdkdiag.AppendFromErr(diags, err)
+	}
+
 	d.Set(names.AttrARN, endpointGroup.EndpointGroupArn)
-	if err := d.Set("endpoint_configuration", flattenEndpointDescriptions(endpointGroup.EndpointDescriptions)); err != nil {
+	if err := d.Set("endpoint_configuration", flattenEndpointDescriptions(endpointGroup.EndpointDescriptions, crossAccountResources)); err != nil {
 		return sdkdiag.AppendErrorf(diags, "setting endpoint_configuration: %s", err)
 	}
 	d.Set("endpoint_group_region", endpointGroup.EndpointGroupRegion)
@@ -466,7 +472,7 @@ func expandPortOverrides(tfList []interface{}) []awstypes.PortOverride {
 	return apiObjects
 }
 
-func flattenEndpointDescription(apiObject *awstypes.EndpointDescription) map[string]interface{} {
+func flattenEndpointDescription(apiObject *awstypes.EndpointDescription, crossAccountResources map[string]string) map[string]interface{} {
 	if apiObject == nil {
 		return nil
 	}
@@ -478,7 +484,11 @@ func flattenEndpointDescription(apiObject *awstypes.EndpointDescription) map[str
 	}
 
 	if v := apiObject.EndpointId; v != nil {
-		tfMap["endpoint_id"] = aws.ToString(v)
+		endpointId := aws.ToString(v)
+		tfMap["endpoint_id"] = endpointId
+		if crossAccountAttachment, ok := crossAccountResources[endpointId]; ok {
+			tfMap["cross_account_attachment_arn"] = crossAccountAttachment
+		}
 	}
 
 	if v := apiObject.Weight; v != nil {
@@ -488,7 +498,7 @@ func flattenEndpointDescription(apiObject *awstypes.EndpointDescription) map[str
 	return tfMap
 }
 
-func flattenEndpointDescriptions(apiObjects []awstypes.EndpointDescription) []interface{} {
+func flattenEndpointDescriptions(apiObjects []awstypes.EndpointDescription, crossAccountResources map[string]string) []interface{} {
 	if len(apiObjects) == 0 {
 		return nil
 	}
@@ -496,7 +506,7 @@ func flattenEndpointDescriptions(apiObjects []awstypes.EndpointDescription) []in
 	var tfList []interface{}
 
 	for _, apiObject := range apiObjects {
-		tfList = append(tfList, flattenEndpointDescription(&apiObject))
+		tfList = append(tfList, flattenEndpointDescription(&apiObject, crossAccountResources))
 	}
 
 	return tfList
@@ -532,4 +542,27 @@ func flattenPortOverrides(apiObjects []awstypes.PortOverride) []interface{} {
 	}
 
 	return tfList
+}
+
+// getCrossAccountResources returns a map[endpointId]attachmentARN
+func getCrossAccountResources(ctx context.Context, conn *globalaccelerator.Client) (map[string]string, error) {
+	accountsResult, err := conn.ListCrossAccountResourceAccounts(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// EndpointId -> AttachmentArn
+	result := map[string]string{}
+
+	for _, accID := range accountsResult.ResourceOwnerAwsAccountIds {
+		crossResourcesResult, _ := conn.ListCrossAccountResources(ctx, &globalaccelerator.ListCrossAccountResourcesInput{
+			ResourceOwnerAwsAccountId: aws.String(accID),
+		})
+
+		for _, resource := range crossResourcesResult.CrossAccountResources {
+			result[*resource.EndpointId] = *resource.AttachmentArn
+		}
+	}
+
+	return result, nil
 }
